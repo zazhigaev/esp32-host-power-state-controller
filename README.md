@@ -1,254 +1,162 @@
-# IPC-R300 Mini-IPMI & EC Hardware Watchdog
+# ESP32 Host Power & State Controller (HPSC)
 
-Компактная плата удаленного управления и мониторинга сервера (mini-IPMI) на базе микроконтроллера **ESP32-C3 Super Mini**, предназначенная для работы с ПК на базе платы **IPC-R300** (АПКШ "Континент" 4 серии).
+[![GitHub release (latest by date)](https://img.shields.io/github/v/release/zazhigaev/esp32-host-power-state-controller?style=flat-square&color=blue)](https://github.com/zazhigaev/esp32-host-power-state-controller/releases)
+[![License: MIT](https://img.shields.io/badge/License-MIT-green.svg?style=flat-square)](LICENSE)
+[![Platform: ESP32-C3](https://img.shields.io/badge/Platform-ESP32--C3-orange.svg?style=flat-square)](https://www.espressif.com/en/products/socs/esp32-c3)
+[![Framework: Arduino / PlatformIO](https://img.shields.io/badge/Framework-PlatformIO-lightgrey.svg?style=flat-square)](https://platformio.org/)
 
-Прошивка реализует пассивный перехват и строчный анализ сервисного UART-потока встроенного контроллера (EC / CPLD платформы AMI Aptio V / Intel FSP), аппаратный сторожевой таймер зависания хоста (Watchdog FSM), гальванически развязанное управление кнопками питания и сброса, защищенный веб-интерфейс (Basic Auth с возможностью смены пароля и безопасного завершения сессии), а также публикацию телеметрии и прием команд по протоколу MQTT для интеграции в Home Assistant.
+**ESP32 Host Power & State Controller (HPSC)** is an out-of-band hardware power management and state monitoring controller built on the **ESP32-C3 Super Mini**. Designed primarily for industrial/embedded platforms (such as the IPC-R300), it bridges physical power control lines and Embedded Controller (EC) UART telemetry with a responsive Web UI and Home Assistant via MQTT.
 
----
+Unlike basic smart relays, HPSC parses real-time POST codes and ACPI power state transitions directly from the host's EC bus to accurately track boot progression, host uptime, and system hangs—enabling autonomous hardware watchdog recovery.
 
-## 1. Ключевые возможности
+## Key Features
 
-* **Пассивный EC/POST декодер:** Не требует установки драйверов, ОС-демонов или агентского ПО на стороне хоста. Контроллер перехватывает фазы инициализации вторичных шин (`PWR init state`), дежурные режимы ACPI (`Power state S4/S5`) и контрольные точки UEFI BIOS.
-* **Аппаратный FSM Watchdog (восстановление хоста):**
-  * Если BIOS застывает на этапе инициализации оборудования (`HOST_BOOTING`) дольше 30 секунд, контроллер подает короткий импульс питания (200 мс) для выключения.
-  * Если система не выключилась за 5 секунд — выдается аппаратный сброс (Reset 200 мс).
-  * При подтвержденном выключении через 3 секунды подается чистый импульс включения.
-* **Безопасный автозапуск (Auto-Power):** При подаче питания на стойку/БП контроллер выжидает 5 секунд. Если хост уже работает, загружается или находится в цикле восстановления — импульс блокируется.
-* **Потокобезопасная архитектура FreeRTOS:**
-  * Задачи асинхронного веб-сервера (`AsyncTCP`) и основной цикл (`loopTask`) строго изолированы.
-  * Все команды на изменение питания и запись в NVS передаются через очередь `cmdQueue`.
-  * Чтение и обновление системной конфигурации защищены мьютексом `cfgMutex`.
-  * Кэш учетных данных авторизации защищен отдельным легковесным мьютексом `authMutex`, а смена пароля подтверждается клиенту синхронно через бинарный семафор `authDoneSem`.
-* **64-битный монотонный Uptime:** Подсчет непрерывного времени работы хоста и ESP32 осуществляется через нативный таймер `esp_timer_get_time()`, исключающий сброс в ноль при переполнении 32-битного `millis()` каждые 49.7 суток.
-* **Аппаратный аварийный сброс (GPIO9 / BOOT):** Возможность мгновенного возврата учетных данных веб-интерфейса к заводским значениям по удержанию физической кнопки при включении.
+* **Out-of-Band Power Control:** Galvanically isolated (optocoupler) actuation of `Power SW` (short pulse & 5-second hard force-off) and `Reset` headers.
 
----
+* **EC / POST Code Telemetry:** Real-time parsing of UART logs from the motherboard's Embedded Controller, decoding AMI / Intel FSP POST checkpoints and hardware fault codes.
 
-## 2. Аппаратная схема подключения
+* **Accurate State & Uptime Tracking:**
 
-### Назначение выводов ESP32-C3 Super Mini
+  * Tracks distinct platform states: `Offline (S4/S5)`, `Booting (POST)`, `Online (S0)`, and `Boot Hung`.
 
-| Пин ESP32-C3 | Направление | Назначение | Описание подключения |
-| :--- | :---: | :--- | :--- |
-| **GPIO1** | Выход | Power SW | Резистор 150 Ом $\to$ Анод оптопары PC817 (1) |
-| **GPIO3** | Выход | Reset SW | Резистор 150 Ом $\to$ Анод оптопары PC817 (2) |
-| **GPIO4** | Вход | UART1 RX | TX сервисного разъема EC платы IPC-R300 |
-| **GPIO5** | Выход | UART1 TX | RX разъема EC (зарезервировано) |
-| **GPIO8** | Выход | Светодиод платы | Синий LED платы (индикация режимов и сброса) |
-| **GPIO9** | Вход | Кнопка BOOT | Аппаратная кнопка на плате (подтяжка к 3.3V) |
-| **GND** | Питание | Общий минус | GND дежурного питания сервера |
-| **5V / VIN** | Питание | +5V Standby | Дежурная линия +5VSB источника питания |
+  * Maintains independent **Host Uptime** (resilient against non-zero runtime POST events) and **ESP32 Uptime**.
 
-### Принципиальная схема включения
+  * Detects power loss via UART bus silence and RX line state.
 
+* **Autonomous Hardware Watchdog:** Automatically detects POST hangs (stalled >30s during boot) and executes a staged recovery sequence (soft ACPI power-off pulse $\rightarrow$ fallback hardware reset $\rightarrow$ power-on).
+
+* **Safe Auto-Power-On:** Optional delayed power-on upon AC restoration, strictly suppressed if the host is already running or was manually shut down.
+
+* **Asynchronous Web Interface & Captive Portal:**
+
+  * Zero-configuration AP mode (`HPSC-Config-AP`) with non-blocking Wi-Fi scanning, DHCP/Static IP setup, and mDNS (`http://hpsc.local`).
+
+  * Protected by HTTP Basic Authentication with thread-safe credential updates and physical `BOOT` button (GPIO9) password reset.
+
+* **Home Assistant & MQTT Integration:** Real-time state publishing, JSON telemetry payload, LWT (Last Will and Testament), and remote power/reset command topics.
+
+## Hardware & Pinout
+
+Built around an **ESP32-C3 Super Mini** powered via the motherboard's `5VSB` (5V Standby) rail so the controller remains active while the host is powered down.
+
+| ESP32-C3 Pin | Function | Connection / Notes | 
+| ----- | ----- | ----- | 
+| **GPIO 1** | `PIN_PWR` | Optocoupler driving motherboard `PWR_SW` header (Active HIGH) | 
+| **GPIO 3** | `PIN_RESET` | Optocoupler driving motherboard `RESET_SW` header (Active HIGH) | 
+| **GPIO 4** | `UART_RX` | Connects to Host EC / Debug `TX` (115200 8N1, internal pulldown) | 
+| **GPIO 5** | `UART_TX` | Connects to Host EC / Debug `RX` (115200 8N1) | 
+| **GPIO 8** | `PIN_LED` | Onboard status LED (Fast blink in AP mode, solid off/idle in STA) | 
+| **GPIO 9** | `PIN_BOOT` | Hardware `BOOT` button — hold for 3s at power-up to reset HTTP credentials | 
+
+> **Safety Note:** Always use optocouplers (e.g., PC817 / LTV-817) between the ESP32 GPIOs and the motherboard front-panel headers to prevent ground loops and protect the MCU. Ensure UART voltage levels match (3.3V TTL).
+
+## Architecture & Firmware Design
+
+The firmware (`v6.4`) is engineered for continuous 24/7 operation on single-core RISC-V FreeRTOS:
+
+* **Thread-Safe Command Queue:** Web server callbacks (`AsyncWebServer`) and MQTT handlers never touch NVS flash or hardware GPIOs directly. All actions are dispatched via a FreeRTOS `SystemCommand` queue (`cmdQueue`) to `loopTask`.
+
+* **Atomic State Protection:** Shared state (`PcStatus`), authentication caches, and Wi-Fi scan buffers are guarded by FreeRTOS mutexes and critical sections (`portMUX_TYPE`) to prevent race conditions and heap fragmentation.
+
+* **Non-Blocking Execution:** All timing operations (optocoupler pulses, watchdog recovery stages, Wi-Fi scans, and delayed restarts) use non-blocking state machines.
+
+## Getting Started
+
+### 1. Building & Flashing
+
+This project uses [PlatformIO](https://platformio.org/).
+
+```bash
+# Clone the repository
+git clone https://github.com/zazhigaev/esp32-host-power-state-controller.git
+cd esp32-host-power-state-controller
+
+# Build and upload firmware
+pio run -t upload
 ```
-               ESP32-C3 Super Mini               PC817              IPC-R300 FP Header
-             +---------------------+          +---------+          +-------------------+
-             |                     |          |  1   4  |          |
-             |               GPIO1 +--[150R]--+--|>|-+  +----------+ PWR_SW+ (+3.3V)   |
-             |                     |          |      |  |          |                   |
-             |                 GND +----------+------+--+----------+ PWR_SW- (GND)     |
-             |                     |          |  2   3  |          |                   |
-             |                     |          +---------+          |                   |
-             |                     |                               |                   |
-             |                     |          +---------+          |                   |
-             |               GPIO3 +--[150R]--+--|>|-+  +----------+ RESET+ (+3.3V)    |
-             |                     |          |      |  |          |                   |
-             |                 GND +----------+------+--+----------+ RESET- (GND)      |
-             |                     |          |  2   3  |          +-------------------+
-             |                     |          +---------+
-             |                     |
-             |   GPIO4 (UART RX)   +<------------------------------ TX EC Debug Header
-             |                 GND +------------------------------- GND Материнской платы
-             |                     |
-             |   GPIO9 (BOOT BTN)  +--[SW]--+ (на плате)
-             |                 GND +--------+
-             +---------------------+
-```
 
-> **Важно по токоограничивающим резисторам:** На управляющих входах оптопар (GPIO1, GPIO3) необходимо применять токоограничивающие резисторы сопротивлением **150 Ом**. При логическом уровне 3.3 В номинал 150 Ом задает ток через инфракрасный диод около $13\dots14\text{ мА}$, обеспечивая переход фототранзистора PC817 в режим глубокого насыщения ($R_{CE} < 10\text{ Ом}$) для преодоления низкоомных подтяжек на материнской плате.
+### 2. Initial Wi-Fi Setup (Captive Portal)
 
----
+1. On first boot (or when no Wi-Fi credentials are stored), the ESP32 starts an Access Point:
 
-## 3. Таблица контрольных точек BIOS (AMI / Intel FSP)
+   * **SSID:** `HPSC-Config-AP`
 
-| POST (HEX) | Статус платформы | Описание аппаратного этапа |
-| :--- | :--- | :--- |
-| `0x00000000` | **OS Running / Heartbeat** | Управление передано ядру ОС (S0), система активна |
-| `0x0000001C` | **Power State S4/S5 (Off)** | Завершено снятие вторичных шин питания (дежурный режим) |
-| `0x00000024` | **RAM SPD Addressing** | Опрос микросхем SPD модулей оперативной памяти |
-| `0x00000025` | **RAM Training MRC** | Инициализация и калибровка контроллера памяти Intel MRC |
-| `0x00000055` | **RAM Error / Not Detected** | Аппаратный сбой памяти: модуль не обнаружен / ошибка MRC |
-| `0x00000071` | **PCH SATA Controller Init** | Инициализация SATA-контроллера чипсета |
-| `0x00000075` | **Storage Detection** | Поиск и идентификация накопителей (SSD/HDD) |
-| `0x00000077` | **SATA Devices Configured** | Накопители успешно опознаны и настроены |
-| `0x00000079` | **Storage / SSD Failure** | Аппаратный сбой инициализации дисковой подсистемы |
-| `0x00000088` | **PCIe Bus Enumeration** | Сканирование и конфигурирование шины PCI Express |
-| `0x00000091` | **PCIe Subsystem Setup** | Инициализация устройств PCIe (сетевые чипы Intel i211/i225) |
-| `0x00000095` | **PCIe Resource Allocation** | Распределение ресурсов адресации и прерываний PCIe |
-| `0x00000098` | **Console Input Devices** | Инициализация интерфейсов ввода (USB HID / клавиатура) |
-| `0x00000099` | **BDS: Super I/O Hand-off** | Передача управления BDS-секвенсеру загрузки |
-| `0x0000009C` | **USB Controllers Ready** | Контроллеры USB xHCI готовы к работе |
+   * **Password:** `P@$$w0rd`
 
----
+2. Connect to the AP and open `http://192.168.4.1` (or follow the captive portal prompt).
 
-## 4. Безопасность, аутентификация и сброс через GPIO9
+3. Select your Wi-Fi network, choose **DHCP** or **Static IP**, and click **Save & Connect**.
 
-### Доступ к веб-интерфейсу
+4. Once connected to your LAN, access the dashboard at `http://hpsc.local` or its assigned IP address.
 
-Все страницы управления, эндпоинты импульсов и REST API защищены HTTP Basic Authentication.
-* **Заводские учетные данные по умолчанию:**
-  * **Логин:** `admin`
-  * **Пароль:** `admin`
-* При первичной настройке в режиме точки доступа (`IPMI-Config-AP`, IP `192.168.4.1`) мастер настройки сети открыт без пароля.
+   * **Default Web Login:** `admin` / `admin` *(Change immediately via the Security panel in the Web UI)*.
 
-### Синхронная смена пароля и завершение сессии
+> **Forgot Web Password?** Hold the onboard **BOOT (GPIO 9)** button while powering on or resetting the ESP32-C3 for 3 seconds until the LED flashes rapidly. Credentials will reset to `admin` / `admin`.
 
-1. В карточке **Security / Password** можно задать новый логин (1–31 символов) и пароль (4–63 символов).
-2. Запрос отправляется на `/api/settings/auth`. Команда передается в `cmdQueue`, а HTTP-задача синхронно ожидает подтверждения через семафор `authDoneSem`. Браузер получает ответ `200 OK` только тогда, когда новые данные сохранены в NVS и зафиксированы в оперативной памяти под защитой `authMutex`.
-3. После смены учетных данных происходит автоматический редирект на `/logout`.
-4. Кнопка **Logout** в интерфейсе отправляет клиенту сброс сохраненных учетных данных без застревания на технической странице 401.
+## MQTT & Home Assistant Integration
 
-### Аварийный сброс учетных данных (Кнопка BOOT на GPIO9)
+Configure your MQTT broker IP, port, and credentials directly from the Web UI under **MQTT Settings**.
 
-Если логин или пароль от веб-интерфейса утеряны:
+### Published Telemetry Topics
 
-1. Обесточьте плату ESP32-C3.
-2. Зажмите физическую кнопку **BOOT** на плате ESP32-C3.
-3. Подайте питание (или кратковременно нажмите Reset), продолжая удерживать **BOOT**.
-4. Светодиод (GPIO8) перейдет в режим частого стробирования (100 мс).
-5. Удерживайте кнопку **3 секунды**, пока светодиод не загорится непрерывно на 1 секунду.
-6. Отпустите кнопку. Контроллер очистит ключи `http_user` и `http_pass` в NVS и восстановит пару `admin / admin`. Настройки Wi-Fi и параметры брокера MQTT сохраняются без изменений.
+| Topic | Payload Example | Description | 
+| ----- | ----- | ----- | 
+| `homeassistant/sensor/hpsc/status` | `online`, `booting`, `offline`, `hung`, `restarting` | Current host state (LWT: `offline`) | 
+| `homeassistant/sensor/hpsc/post_code` | `00000000`, `00000099` | Latest hex POST code from EC | 
+| `homeassistant/sensor/hpsc/post_desc` | `OS Running / Heartbeat` | Human-readable POST description | 
+| `homeassistant/sensor/hpsc/pwr_state` | `S0 (Active)`, `S4/S5 (Off)` | ACPI / power rail state | 
+| `homeassistant/sensor/hpsc/host_uptime` | `145230` | Host continuous online uptime (seconds) | 
+| `homeassistant/sensor/hpsc/esp_uptime` | `512400` | Controller uptime (seconds) | 
+| `homeassistant/sensor/hpsc/state` | `{"status":"online","post_hex":"00000000",...}` | Combined JSON state payload | 
 
----
+### Command Topics
 
-## 5. REST API спецификация
+| Topic | Accepted Payloads | Action | 
+| ----- | ----- | ----- | 
+| `homeassistant/switch/hpsc/power/set` | `PRESS`, `PULSE`, `ON` | Triggers a 200ms `Power SW` pulse | 
+| `homeassistant/switch/hpsc/power/set` | `FORCE_OFF` | Triggers a 5000ms hard power-off hold | 
+| `homeassistant/switch/hpsc/reset/set` | `PRESS`, `RESET`, `ON` | Triggers a 200ms hardware `Reset` pulse | 
 
-| Метод | Эндпоинт | Аутентификация | Описание |
-| :--- | :--- | :---: | :--- |
-| `GET` | `/` | Basic Auth | Главный дашборд управления и телеметрии |
-| `GET` | `/logout` | Нет | Завершение текущей сессии и очистка заголовков |
-| `GET` | `/api/metrics` | Basic Auth | JSON-снапшот статуса, кодов POST и аптайма |
-| `POST` | `/pwr/pulse` | Basic Auth | Импульс кнопки Power (200 мс) |
-| `POST` | `/pwr/force` | Basic Auth | Аппаратное удержание Power (5 сек, Force Off) |
-| `POST` | `/reset` | Basic Auth | Импульс кнопки Reset (200 мс) |
-| `GET` | `/api/settings/mqtt` | Basic Auth | Получение текущей конфигурации MQTT |
-| `POST` | `/api/settings/mqtt` | Basic Auth | Сохранение настроек брокера MQTT |
-| `POST` | `/api/settings/auth` | Basic Auth | Синхронное обновление логина и пароля |
-| `POST` | `/api/reset_wifi` | Basic Auth | Сброс сетевых настроек и рестарт в режим AP |
-
----
-
-## 6. Интеграция с MQTT и Home Assistant
-
-### Топики MQTT
-
-| Топик | QOS / Retain | Формат нагрузки | Назначение |
-| :--- | :---: | :--- | :--- |
-| `homeassistant/sensor/mini_ipmi/status` | 1 / True | `online` \| `booting` \| `hung` \| `offline` | Текущий рабочий статус хоста |
-| `homeassistant/sensor/mini_ipmi/post_code` | 1 / True | `00000000` (HEX) | Последний перехваченный POST-код |
-| `homeassistant/sensor/mini_ipmi/post_desc` | 1 / True | Строка UTF-8 | Текстовая расшифровка этапа |
-| `homeassistant/sensor/mini_ipmi/pwr_state` | 1 / True | Строка | Линия питания (`S0 (Active)`, `S4/S5 (Off)`) |
-| `homeassistant/sensor/mini_ipmi/host_uptime` | 1 / True | Целое (секунды) | Аптайм ОС хоста (с момента кода 0x00) |
-| `homeassistant/sensor/mini_ipmi/esp_uptime` | 1 / True | Целое (секунды) | Непрерывный аптайм контроллера ESP32 |
-| `homeassistant/sensor/mini_ipmi/state` | 1 / True | JSON (до 512 B) | Сводный телеметрический пакет |
-| `homeassistant/switch/mini_ipmi/power/set` | 0 / False | `PRESS` \| `FORCE_OFF` | Команда управления питанием |
-| `homeassistant/switch/mini_ipmi/reset/set` | 0 / False | `PRESS` \| `RESET` | Команда аппаратного сброса |
-| `homeassistant/switch/mini_ipmi/result` | 1 / False | `OK` \| `BUSY` | Статус исполнения команды контроллером |
-
-### Конфигурация сущностей для Home Assistant (`configuration.yaml`)
+### Example Home Assistant Configuration (`configuration.yaml`)
 
 ```yaml
 mqtt:
+  sensor:
+    - name: "Server Host Status"
+      state_topic: "homeassistant/sensor/hpsc/status"
+      icon: "mdi:server"
+
+    - name: "Server POST Code"
+      state_topic: "homeassistant/sensor/hpsc/post_code"
+      value_template: "0x{{ value }}"
+      icon: "mdi:chip"
+
+    - name: "Server POST Description"
+      state_topic: "homeassistant/sensor/hpsc/post_desc"
+      icon: "mdi:text-box-outline"
+
+    - name: "Server Host Uptime"
+      state_topic: "homeassistant/sensor/hpsc/host_uptime"
+      unit_of_measurement: "s"
+      device_class: "duration"
+
   button:
-    - name: "IPC-R300 Power Press"
-      unique_id: ipcr300_power_press
-      command_topic: "homeassistant/switch/mini_ipmi/power/set"
+    - name: "Server Power Pulse"
+      command_topic: "homeassistant/switch/hpsc/power/set"
       payload_press: "PRESS"
       icon: "mdi:power"
 
-    - name: "IPC-R300 Hard Power Off"
-      unique_id: ipcr300_power_force_off
-      command_topic: "homeassistant/switch/mini_ipmi/power/set"
+    - name: "Server Hard Power Off"
+      command_topic: "homeassistant/switch/hpsc/power/set"
       payload_press: "FORCE_OFF"
       icon: "mdi:power-plug-off"
 
-    - name: "IPC-R300 Hardware Reset"
-      unique_id: ipcr300_hardware_reset
-      command_topic: "homeassistant/switch/mini_ipmi/reset/set"
-      payload_press: "PRESS"
+    - name: "Server Hardware Reset"
+      command_topic: "homeassistant/switch/hpsc/reset/set"
+      payload_press: "RESET"
       icon: "mdi:restart"
-
-  sensor:
-    - name: "IPC-R300 Platform Status"
-      unique_id: ipcr300_platform_status
-      state_topic: "homeassistant/sensor/mini_ipmi/status"
-      icon: "mdi:server"
-
-    - name: "IPC-R300 POST Code"
-      unique_id: ipcr300_post_code
-      state_topic: "homeassistant/sensor/mini_ipmi/post_code"
-      value_template: "0x{{ value }}"
-      icon: "mdi:barcode"
-
-    - name: "IPC-R300 POST Description"
-      unique_id: ipcr300_post_desc
-      state_topic: "homeassistant/sensor/mini_ipmi/post_desc"
-      icon: "mdi:information-outline"
-
-    - name: "IPC-R300 Power Rail"
-      unique_id: ipcr300_power_rail
-      state_topic: "homeassistant/sensor/mini_ipmi/pwr_state"
-      icon: "mdi:flash"
-
-    - name: "IPC-R300 Host Uptime"
-      unique_id: ipcr300_host_uptime
-      state_topic: "homeassistant/sensor/mini_ipmi/host_uptime"
-      unit_of_measurement: "s"
-      device_class: duration
-      icon: "mdi:timer-outline"
-
-    - name: "IPC-R300 Controller Uptime"
-      unique_id: ipcr300_esp_uptime
-      state_topic: "homeassistant/sensor/mini_ipmi/esp_uptime"
-      unit_of_measurement: "s"
-      device_class: duration
-      icon: "mdi:chip"
-
-  binary_sensor:
-    - name: "IPC-R300 Hardware Problem"
-      unique_id: ipcr300_hw_problem
-      state_topic: "homeassistant/sensor/mini_ipmi/state"
-      value_template: "{{ 'ON' if value_json.error else 'OFF' }}"
-      device_class: problem
 ```
 
----
+## License
 
-## 7. Сборка проекта (PlatformIO)
-
-Файл `platformio.ini`:
-
-```ini
-[env:esp32-c3-devkitm-1]
-platform = espressif32
-board = esp32-c3-devkitm-1
-framework = arduino
-monitor_speed = 115200
-
-build_flags = 
-    -DARDUINO_USB_MODE=1
-    -DARDUINO_USB_CDC_ON_BOOT=1
-
-lib_deps =
-    bblanchon/ArduinoJson@^7.0.0
-    knolleary/PubSubClient@^2.8
-    mathieucarbou/ESPAsyncWebServer@^3.1.5
-    mathieucarbou/AsyncTCP@^3.1.4
-```
-
-Сборка и прошивка через CLI:
-```bash
-pio run -t upload
-pio device monitor
-```
+This project is licensed under the **MIT License** — see the [LICENSE](LICENSE) file for details.

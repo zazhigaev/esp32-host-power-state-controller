@@ -254,7 +254,7 @@ bool loadSettings() {
         Serial.println("[ERROR] loadSettings() failed to take cfgMutex!");
         return false;
     }
-    if (!prefs.begin("ipmi_cfg", true)) {
+    if (!prefs.begin("hpsc_cfg", true)) {
         Serial.println("[ERROR] prefs.begin() failed in loadSettings!");
         xSemaphoreGive(cfgMutex);
         return false;
@@ -280,7 +280,7 @@ bool loadSettings() {
 }
 
 bool saveWifiSettings(const String& ssid, const String& pass, bool dhcp, const String& ip, const String& mask, const String& gw, const String& dns) {
-    if (!prefs.begin("ipmi_cfg", false)) {
+    if (!prefs.begin("hpsc_cfg", false)) {
         Serial.println("[ERROR] prefs.begin() failed in saveWifiSettings!");
         return false;
     }
@@ -301,7 +301,7 @@ bool saveWifiSettings(const String& ssid, const String& pass, bool dhcp, const S
 }
 
 bool saveMqttSettings(const String& host, int port, const String& user, const String& mqpass, bool clearPass) {
-    if (!prefs.begin("ipmi_cfg", false)) {
+    if (!prefs.begin("hpsc_cfg", false)) {
         Serial.println("[ERROR] prefs.begin() failed in saveMqttSettings!");
         return false;
     }
@@ -354,7 +354,7 @@ void updateRestart() {
         Serial.println("[SYSTEM] Restarting ESP32...");
         // Корректное уведомление брокера перед рестартом
         if (!isApMode && mqttClient.connected()) {
-            mqttClient.publish("homeassistant/sensor/mini_ipmi/status", "restarting", true);
+            mqttClient.publish("homeassistant/sensor/hpsc/status", "restarting", true);
             mqttClient.disconnect();
         }
         ESP.restart();
@@ -384,20 +384,20 @@ void publishPcState() {
     else if (st == HOST_BOOTING) statusStr = "booting";
     else if (st == HOST_HANG) statusStr = "hung";
 
-    mqttClient.publish("homeassistant/sensor/mini_ipmi/status", statusStr, true);
-    mqttClient.publish("homeassistant/sensor/mini_ipmi/post_code", codeHex, true);
-    mqttClient.publish("homeassistant/sensor/mini_ipmi/post_desc", desc, true);
-    mqttClient.publish("homeassistant/sensor/mini_ipmi/pwr_state", pwr, true);
+    mqttClient.publish("homeassistant/sensor/hpsc/status", statusStr, true);
+    mqttClient.publish("homeassistant/sensor/hpsc/post_code", codeHex, true);
+    mqttClient.publish("homeassistant/sensor/hpsc/post_desc", desc, true);
+    mqttClient.publish("homeassistant/sensor/hpsc/pwr_state", pwr, true);
 
     uint64_t currentSec = getUptimeSec();
     char secBuf[32];
     snprintf(secBuf, sizeof(secBuf), "%llu", currentSec);
-    mqttClient.publish("homeassistant/sensor/mini_ipmi/esp_uptime", secBuf, true);
+    mqttClient.publish("homeassistant/sensor/hpsc/esp_uptime", secBuf, true);
 
     uint64_t hostUptimeSec = (st == HOST_ONLINE && startSec > 0 && currentSec >= startSec)
                              ? (currentSec - startSec) : 0ULL;
     snprintf(secBuf, sizeof(secBuf), "%llu", hostUptimeSec);
-    mqttClient.publish("homeassistant/sensor/mini_ipmi/host_uptime", secBuf, true);
+    mqttClient.publish("homeassistant/sensor/hpsc/host_uptime", secBuf, true);
 
     char jsonBuf[512];
     snprintf(jsonBuf, sizeof(jsonBuf),
@@ -405,7 +405,7 @@ void publishPcState() {
              statusStr, codeHex, desc, pwr, err ? "true" : "false", hostUptimeSec, currentSec
             );
 
-    if (!mqttClient.publish("homeassistant/sensor/mini_ipmi/state", jsonBuf, true)) {
+    if (!mqttClient.publish("homeassistant/sensor/hpsc/state", jsonBuf, true)) {
         Serial.println("[MQTT] Warning: Failed to publish telemetry JSON state (buffer overflow?)");
     }
 }
@@ -481,8 +481,12 @@ void processEcLine(const char* line) {
                     safeStrCopy(pcStatus.pwrState, "S0 (Active)", sizeof(pcStatus.pwrState));
                     recState = REC_IDLE;
                 } else {
-                    pcStatus.state = HOST_BOOTING;
-                    safeStrCopy(pcStatus.pwrState, "POST (S0)", sizeof(pcStatus.pwrState));
+                    // Ненулевой POST-код в состоянии HOST_ONLINE не считается признаком перезагрузки,
+                    // поэтому статус активности и таймер uptime хоста не сбрасываются.
+                    if (pcStatus.state != HOST_ONLINE) {
+                        pcStatus.state = HOST_BOOTING;
+                        safeStrCopy(pcStatus.pwrState, "POST (S0)", sizeof(pcStatus.pwrState));
+                    }
                 }
                 stateChanged = true;
             } else if (val == 0) {
@@ -741,7 +745,7 @@ void processIncomingCommands() {
                     // Захватываем кэш до записи NVS: при невозможности обновить кэш
                     // не меняем постоянные учётные данные.
                     if (xSemaphoreTake(authMutex, pdMS_TO_TICKS(500)) == pdTRUE) {
-                        if (prefs.begin("ipmi_cfg", false)) {
+                        if (prefs.begin("hpsc_cfg", false)) {
                             size_t w1 = prefs.putString("http_user", cmd.authPayload.user);
                             size_t w2 = prefs.putString("http_pass", cmd.authPayload.pass);
                             prefs.end();
@@ -778,7 +782,7 @@ void processIncomingCommands() {
             }
 
             case ACT_RESET_WIFI:
-                if (prefs.begin("ipmi_cfg", false)) {
+                if (prefs.begin("hpsc_cfg", false)) {
                     prefs.remove("ssid");
                     prefs.remove("pass");
                     prefs.end();
@@ -818,7 +822,7 @@ const char config_html[] PROGMEM = R"rawliteral(
 <!DOCTYPE HTML><html>
 <head>
 <meta charset="utf-8">
-<title>IPC-R300 Wi-Fi Setup</title>
+<title>HPSC Wi-Fi Setup</title>
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <style>
 body { font-family: Arial, sans-serif; background: #1e1e2e; color: #cdd6f4; margin: 15px; text-align: center; }
@@ -927,7 +931,7 @@ if (!res.ok) return res.text().then(t => { throw new Error(t); });
 document.getElementById('setup_box').style.display = 'none';
 document.getElementById('overlay').style.display = 'block';
 let count = 8;
-const targetHost = (isDhcp === "0") ? ipVal : "ipmi.local";
+const targetHost = (isDhcp === "0") ? ipVal : "hpsc.local";
 const timer = setInterval(() => {
 count--;
 document.getElementById('countdown').innerText = 'Redirecting to http://' + targetHost + ' in ' + count + 's...';
@@ -950,7 +954,7 @@ const char index_html[] PROGMEM = R"rawliteral(
 <!DOCTYPE HTML><html>
 <head>
 <meta charset="utf-8">
-<title>IPC-R300 mini-IPMI</title>
+<title>HPSC — Host Power & State Controller</title>
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <style>
 body { font-family: Arial, sans-serif; text-align: center; margin: 15px; background: #1e1e2e; color: #cdd6f4; }
@@ -980,7 +984,7 @@ label { font-size: 12px; color: #a6adc8; display: block; margin-top: 6px; }
 </head>
 <body>
 <div class="top-bar">
-<h2>Mini-IPMI</h2>
+<h2>HPSC</h2>
 <a href="#" class="btn-logout" onclick="return doLogout(event)">Logout</a>
 </div>
 <div class="card">
@@ -1194,18 +1198,18 @@ void checkMqtt() {
         static uint32_t lastMqtt = 0;
         if (millis() - lastMqtt > 5000) {
             lastMqtt = millis();
-            String cid = "ESP32-IPMI-" + String(WiFi.macAddress());
+            String cid = "ESP32-HPSC-" + String(WiFi.macAddress());
             String user, pass;
             if (xSemaphoreTake(cfgMutex, pdMS_TO_TICKS(100)) == pdTRUE) {
                 user = appCfg.mqtt_user;
                 pass = appCfg.mqtt_pass;
                 xSemaphoreGive(cfgMutex);
             }
-            if (mqttClient.connect(cid.c_str(), user.c_str(), pass.c_str(), "homeassistant/sensor/mini_ipmi/status", 1, true, "offline")) {
+            if (mqttClient.connect(cid.c_str(), user.c_str(), pass.c_str(), "homeassistant/sensor/hpsc/status", 1, true, "offline")) {
                 Serial.println("[MQTT] Connected!");
                 publishPcState();
-                mqttClient.subscribe("homeassistant/switch/mini_ipmi/power/set");
-                mqttClient.subscribe("homeassistant/switch/mini_ipmi/reset/set");
+                mqttClient.subscribe("homeassistant/switch/hpsc/power/set");
+                mqttClient.subscribe("homeassistant/switch/hpsc/reset/set");
             }
         }
     } else {
@@ -1221,7 +1225,7 @@ void mqttCallback(char* topic, byte* payload, unsigned int length) {
     SystemCommand cmd;
     memset(&cmd, 0, sizeof(cmd));
 
-    if (t == "homeassistant/switch/mini_ipmi/power/set") {
+    if (t == "homeassistant/switch/hpsc/power/set") {
         if (msg == "PRESS" || msg == "PULSE" || msg == "ON") {
             cmd.action = ACT_POWER_PULSE;
         } else if (msg == "FORCE_OFF") {
@@ -1229,20 +1233,20 @@ void mqttCallback(char* topic, byte* payload, unsigned int length) {
         }
         if (cmd.action != ACT_NONE) {
             if (xQueueSend(cmdQueue, &cmd, 0) == pdTRUE) {
-                mqttClient.publish("homeassistant/switch/mini_ipmi/result", "OK");
+                mqttClient.publish("homeassistant/switch/hpsc/result", "OK");
                 mqttClient.publish(topic, "", true);
             } else {
-                mqttClient.publish("homeassistant/switch/mini_ipmi/result", "BUSY");
+                mqttClient.publish("homeassistant/switch/hpsc/result", "BUSY");
             }
         }
-    } else if (t == "homeassistant/switch/mini_ipmi/reset/set") {
+    } else if (t == "homeassistant/switch/hpsc/reset/set") {
         if (msg == "PRESS" || msg == "RESET" || msg == "ON") {
             cmd.action = ACT_RESET_PULSE;
             if (xQueueSend(cmdQueue, &cmd, 0) == pdTRUE) {
-                mqttClient.publish("homeassistant/switch/mini_ipmi/result", "OK");
+                mqttClient.publish("homeassistant/switch/hpsc/result", "OK");
                 mqttClient.publish(topic, "", true);
             } else {
-                mqttClient.publish("homeassistant/switch/mini_ipmi/result", "BUSY");
+                mqttClient.publish("homeassistant/switch/hpsc/result", "BUSY");
             }
         }
     }
@@ -1257,7 +1261,7 @@ void startCaptivePortal() {
     WiFi.mode(WIFI_AP_STA);
     IPAddress apIP(192, 168, 4, 1);
     WiFi.softAPConfig(apIP, apIP, IPAddress(255, 255, 255, 0));
-    WiFi.softAP("IPMI-Config-AP", "p@ssword");
+    WiFi.softAP("HPSC-Config-AP", "P@$$w0rd");
     dnsServer.start(DNS_PORT, "*", apIP);
 
     server.on("/", HTTP_GET, [](AsyncWebServerRequest *request) {
@@ -1351,7 +1355,7 @@ void setup() {
             }
         }
         if (stillPressed) {
-            if (prefs.begin("ipmi_cfg", false)) {
+            if (prefs.begin("hpsc_cfg", false)) {
                 prefs.remove("http_user");
                 prefs.remove("http_pass");
                 prefs.end();
@@ -1377,7 +1381,7 @@ void setup() {
     while (!Serial && (millis() - serialStart < 2000)) vTaskDelay(pdMS_TO_TICKS(10));
 #endif
 
-    Serial.println("\n[SYSTEM] ESP32-C3 mini-IPMI v6.3 starting...");
+    Serial.println("\n[SYSTEM] ESP32-C3 HPSC v6.4 starting...");
     bootTime = millis();
 
     cfgMutex = xSemaphoreCreateMutex();
@@ -1457,7 +1461,7 @@ void setup() {
     Serial.printf("[WIFI] Connected! IP: %s\n", WiFi.localIP().toString().c_str());
     digitalWrite(PIN_LED, HIGH);
 
-    if (MDNS.begin("ipmi")) {
+    if (MDNS.begin("hpsc")) {
         MDNS.addService("http", "tcp", 80);
     }
 
