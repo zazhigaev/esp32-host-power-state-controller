@@ -287,16 +287,29 @@ bool saveWifiSettings(const String& ssid, const String& pass, bool dhcp, const S
 
     bool ok = true;
     ok &= prefs.putString("ssid", ssid) > 0;
-    ok &= prefs.putString("pass", pass) > 0;
-    ok &= prefs.putBool("dhcp", dhcp) > 0;
+
+    if (pass.length() == 0) {
+        prefs.putString("pass", "");
+    } else {
+        ok &= prefs.putString("pass", pass) > 0;
+    }
+
+    prefs.putBool("dhcp", dhcp);
+    if (prefs.getBool("dhcp", !dhcp) != dhcp) {
+        ok = false;
+    }
+
     if (!dhcp) {
         ok &= prefs.putString("ip", ip) > 0;
         ok &= prefs.putString("mask", mask) > 0;
         ok &= prefs.putString("gw", gw) > 0;
         ok &= prefs.putString("dns", dns) > 0;
     }
+
     prefs.end();
-    if (!ok) Serial.println("[ERROR] One or more Wi-Fi settings failed to write to NVS!");
+    if (!ok) {
+        Serial.println("[ERROR] One or more Wi-Fi settings failed to write to NVS!");
+    }
     return ok;
 }
 
@@ -832,6 +845,7 @@ label { font-size: 13px; color: #a6adc8; display: block; margin-top: 10px; }
 input, select { width: 100%; padding: 8px; margin-top: 4px; box-sizing: border-box; border-radius: 4px; border: 1px solid #45475a; background: #181825; color: #cdd6f4; }
 button { width: 100%; padding: 12px; margin-top: 15px; background: #a6e3a1; color: #11111b; border: none; border-radius: 6px; font-weight: bold; cursor: pointer; }
 .btn-scan { background: #89b4fa; padding: 8px; margin-top: 6px; }
+.btn-toggle { background: #45475a; color: #cdd6f4; padding: 6px; margin-top: 6px; font-size: 11px; }
 #err { color: #f38ba8; font-size: 13px; margin-top: 8px; display: none; }
 #overlay { display: none; margin-top: 20px; font-weight: bold; color: #f9e2af; }
 </style>
@@ -841,10 +855,17 @@ button { width: 100%; padding: 12px; margin-top: 15px; background: #a6e3a1; colo
 <div id="setup_box">
 <form id="wifiForm">
 <label>Wi-Fi Network</label>
+<div id="ssid_select_container">
 <select id="ssid_select" name="ssid">
 <option value="">Searching for networks...</option>
 </select>
 <button type="button" class="btn-scan" onclick="startScan()">Rescan Networks</button>
+</div>
+<div id="ssid_input_container" style="display:none;">
+<input type="text" id="ssid_text" name="ssid_text" placeholder="Enter hidden SSID">
+</div>
+<button type="button" class="btn-toggle" id="toggle_btn" onclick="toggleSsidMode()">Switch to Manual SSID Input</button>
+
 <label>Wi-Fi Password</label>
 <input type="password" id="pass" name="pass" placeholder="Password">
 <label>IP Configuration</label>
@@ -871,80 +892,104 @@ button { width: 100%; padding: 12px; margin-top: 15px; background: #a6e3a1; colo
 <p id="countdown">Connecting... Redirecting in 8 seconds</p>
 </div>
 <script>
+let isManualSsid = false;
 let pollTimer = null;
+
+function toggleSsidMode() {
+    isManualSsid = !isManualSsid;
+    document.getElementById('ssid_select_container').style.display = isManualSsid ? 'none' : 'block';
+    document.getElementById('ssid_input_container').style.display = isManualSsid ? 'block' : 'none';
+    document.getElementById('toggle_btn').innerText = isManualSsid ? 'Select from Scanned Networks' : 'Switch to Manual SSID Input';
+}
+
 function toggleIpFields() {
-const isStatic = document.getElementById('dhcp').value === "0";
-document.getElementById('static_fields').style.display = isStatic ? "block" : "none";
+    const isStatic = document.getElementById('dhcp').value === "0";
+    document.getElementById('static_fields').style.display = isStatic ? "block" : "none";
 }
+
 function startScan() {
-if (pollTimer) clearInterval(pollTimer);
-const sel = document.getElementById('ssid_select');
-sel.innerHTML = '<option value="">Scanning networks...</option>';
-// Явно запрашиваем новое сканирование через POST
-fetch('/scan', { method: 'POST' }).catch(() => {});
-pollTimer = setInterval(() => {
-fetch('/scan').then(r => r.json()).then(data => {
-if (!data.scanning) {
-clearInterval(pollTimer);
-pollTimer = null;
-sel.innerHTML = '';
-if (data.error) {
-sel.innerHTML = '<option value="">Scan failed (click rescan)</option>';
-return;
+    if (pollTimer) clearInterval(pollTimer);
+    const sel = document.getElementById('ssid_select');
+    sel.innerHTML = '<option value="">Scanning networks...</option>';
+    
+    // Триггерим новое сканирование на бэкенде
+    fetch('/scan', { method: 'POST' }).catch(() => {});
+
+    let attempts = 0;
+    pollTimer = setInterval(() => {
+        attempts++;
+        fetch('/scan').then(r => r.json()).then(data => {
+            if (!data.scanning) {
+                clearInterval(pollTimer);
+                pollTimer = null;
+                sel.innerHTML = '';
+                if (data.error || !data.networks || data.networks.length === 0) {
+                    sel.innerHTML = '<option value="">No networks found (click rescan)</option>';
+                    return;
+                }
+                data.networks.forEach(item => {
+                    const opt = document.createElement('option');
+                    opt.value = item.ssid;
+                    opt.text = item.ssid + ' (' + item.rssi + ' dBm)';
+                    sel.appendChild(opt);
+                });
+            } else if (attempts > 15) { // Таймаут 7.5 секунд
+                clearInterval(pollTimer);
+                pollTimer = null;
+                sel.innerHTML = '<option value="">Scan timeout (click rescan)</option>';
+            }
+        }).catch(() => {
+            clearInterval(pollTimer);
+            pollTimer = null;
+            sel.innerHTML = '<option value="">Scan failed (click rescan)</option>';
+        });
+    }, 500);
 }
-if (!data.networks || data.networks.length === 0) {
-sel.innerHTML = '<option value="">No networks found (click rescan)</option>';
-return;
-}
-data.networks.forEach(item => {
-const opt = document.createElement('option');
-opt.value = item.ssid;
-opt.text = item.ssid + ' (' + item.rssi + ' dBm)';
-sel.appendChild(opt);
-});
-}
-}).catch(() => {
-clearInterval(pollTimer);
-pollTimer = null;
-sel.innerHTML = '<option value="">Scan failed (click rescan)</option>';
-});
-}, 600);
-}
+
 function submitConfig() {
-const errBox = document.getElementById('err');
-errBox.style.display = 'none';
-const p = new URLSearchParams();
-const sel = document.getElementById('ssid_select');
-p.append('ssid', sel.value);
-p.append('pass', document.getElementById('pass').value);
-const isDhcp = document.getElementById('dhcp').value;
-p.append('dhcp', isDhcp);
-const ipVal = document.getElementById('ip').value;
-if (isDhcp === "0") {
-p.append('ip', ipVal);
-p.append('mask', document.getElementById('mask').value);
-p.append('gw', document.getElementById('gw').value);
-p.append('dns', document.getElementById('dns').value);
+    const errBox = document.getElementById('err');
+    errBox.style.display = 'none';
+    const p = new URLSearchParams();
+    
+    const ssidVal = isManualSsid ? document.getElementById('ssid_text').value.trim() : document.getElementById('ssid_select').value;
+    if (!ssidVal) {
+        errBox.innerText = 'Please enter or select a valid SSID';
+        errBox.style.display = 'block';
+        return;
+    }
+    
+    p.append('ssid', ssidVal);
+    p.append('pass', document.getElementById('pass').value);
+    const isDhcp = document.getElementById('dhcp').value;
+    p.append('dhcp', isDhcp);
+    const ipVal = document.getElementById('ip').value;
+    if (isDhcp === "0") {
+        p.append('ip', ipVal);
+        p.append('mask', document.getElementById('mask').value);
+        p.append('gw', document.getElementById('gw').value);
+        p.append('dns', document.getElementById('dns').value);
+    }
+    
+    fetch('/save', { method: 'POST', body: p }).then(res => {
+        if (!res.ok) return res.text().then(t => { throw new Error(t); });
+        document.getElementById('setup_box').style.display = 'none';
+        document.getElementById('overlay').style.display = 'block';
+        let count = 8;
+        const targetHost = (isDhcp === "0") ? ipVal : "hpsc.local";
+        const timer = setInterval(() => {
+            count--;
+            document.getElementById('countdown').innerText = 'Redirecting to http://' + targetHost + ' in ' + count + 's...';
+            if (count <= 0) {
+                clearInterval(timer);
+                window.location.href = 'http://' + targetHost;
+            }
+        }, 1000);
+    }).catch(err => {
+        errBox.innerText = err.message;
+        errBox.style.display = 'block';
+    });
 }
-fetch('/save', { method: 'POST', body: p }).then(res => {
-if (!res.ok) return res.text().then(t => { throw new Error(t); });
-document.getElementById('setup_box').style.display = 'none';
-document.getElementById('overlay').style.display = 'block';
-let count = 8;
-const targetHost = (isDhcp === "0") ? ipVal : "hpsc.local";
-const timer = setInterval(() => {
-count--;
-document.getElementById('countdown').innerText = 'Redirecting to http://' + targetHost + ' in ' + count + 's...';
-if (count <= 0) {
-clearInterval(timer);
-window.location.href = 'http://' + targetHost;
-}
-}, 1000);
-}).catch(err => {
-errBox.innerText = err.message;
-errBox.style.display = 'block';
-});
-}
+
 window.onload = startScan;
 </script>
 </body></html>
@@ -968,15 +1013,18 @@ h2 { color: #89b4fa; margin: 0; }
 .metric-bad { color: #f38ba8; }
 .metric-info { color: #89b4fa; }
 .desc-box { background: #181825; padding: 8px 10px; border-radius: 4px; margin-top: 8px; font-size: 13px; color: #f9e2af; border-left: 3px solid #89b4fa; word-break: break-word; }
-.btn { display: block; width: 100%; max-width: 250px; margin: 8px auto; padding: 12px; font-size: 15px; border: none; border-radius: 8px; cursor: pointer; font-weight: bold; }
+.btn { display: block; width: 100%; max-width: 340px; margin: 8px auto; padding: 12px; font-size: 15px; border: none; border-radius: 8px; cursor: pointer; font-weight: bold; box-sizing: border-box; }
 .btn-pwr { background: #a6e3a1; color: #11111b; }
 .btn-force { background: #f38ba8; color: #11111b; }
 .btn-rst { background: #fab387; color: #11111b; }
-.btn-cfg { background: #89b4fa; color: #11111b; }
-.btn-danger { background: #eba0ac; color: #11111b; font-size: 12px; padding: 8px; margin-top: 15px; }
+.btn-settings-toggle { background: #45475a; color: #cdd6f4; margin-top: 14px; }
+.btn-cfg { background: #89b4fa; color: #11111b; padding: 10px; font-size: 14px; margin-top: 10px; }
+.btn-danger { background: #eba0ac; color: #11111b; font-size: 12px; padding: 8px; margin-top: 8px; }
 .btn:disabled { opacity: 0.5; cursor: not-allowed; }
-input[type="text"], input[type="number"], input[type="password"] { width: 100%; padding: 7px; margin-top: 4px; box-sizing: border-box; border-radius: 4px; border: 1px solid #45475a; background: #181825; color: #cdd6f4; }
-label { font-size: 12px; color: #a6adc8; display: block; margin-top: 6px; }
+.settings-section { background: #262736; border: 1px solid #45475a; border-radius: 6px; padding: 12px; margin-top: 12px; }
+.section-title { font-weight: bold; color: #89b4fa; font-size: 13px; text-transform: uppercase; letter-spacing: 0.5px; border-bottom: 1px solid #45475a; padding-bottom: 5px; margin-bottom: 8px; }
+input[type="text"], input[type="number"], input[type="password"], select { width: 100%; padding: 7px; margin-top: 4px; box-sizing: border-box; border-radius: 4px; border: 1px solid #45475a; background: #181825; color: #cdd6f4; }
+label { font-size: 12px; color: #a6adc8; display: block; margin-top: 8px; }
 .check-label { display: flex; align-items: center; margin-top: 8px; cursor: pointer; font-size: 12px; }
 .check-label input { width: auto; margin-right: 8px; }
 #status { margin-top: 10px; font-style: italic; color: #a6adc8; font-size: 13px; }
@@ -987,6 +1035,7 @@ label { font-size: 12px; color: #a6adc8; display: block; margin-top: 6px; }
 <h2>HPSC</h2>
 <a href="#" class="btn-logout" onclick="return doLogout(event)">Logout</a>
 </div>
+
 <div class="card">
 <div style="font-weight:bold; color:#89b4fa; margin-bottom:8px; border-bottom:1px solid #45475a; padding-bottom:4px;">EC Hardware State</div>
 <div class="metric">Platform Status: <span id="m_stat" class="metric-val">Checking...</span></div>
@@ -996,193 +1045,290 @@ label { font-size: 12px; color: #a6adc8; display: block; margin-top: 6px; }
 <div class="metric">ESP32 Uptime: <span id="m_euptime" class="metric-val">-</span></div>
 <div class="desc-box" id="m_desc">Listening to EC UART...</div>
 </div>
+
 <button class="btn btn-pwr action-btn" onclick="sendCmd('/pwr/pulse')">Power on/off</button>
 <button class="btn btn-force action-btn" onclick="sendCmd('/pwr/force')">Hard Power Off (5s)</button>
 <button class="btn btn-rst action-btn" onclick="sendCmd('/reset')">Reset</button>
-<div class="card">
-<div style="font-weight:bold; color:#89b4fa; cursor:pointer;" onclick="toggleMqttForm()">
-&#9881; MQTT Settings (<span id="mqtt_state">click to expand</span>)
+
+<button class="btn btn-settings-toggle" onclick="toggleSettingsPanel()">&#9881; Settings</button>
+
+<div id="settings_panel" class="card" style="display:none;">
+  <div style="font-weight:bold; color:#cdd6f4; font-size:15px;">Controller Configuration</div>
+
+  <!-- Блок 1: Сеть и Wi-Fi -->
+  <div class="settings-section">
+    <div class="section-title">Network / Wi-Fi</div>
+    <label>Wi-Fi SSID</label>
+    <input type="text" id="cfg_wifi_ssid" maxlength="32">
+    <label>Wi-Fi Password</label>
+    <input type="password" id="cfg_wifi_pass" maxlength="64" placeholder="Leave blank to keep unchanged">
+    <label>IP Configuration</label>
+    <select id="cfg_wifi_dhcp" onchange="toggleStaticIpFields()">
+      <option value="1">DHCP (Automatic)</option>
+      <option value="0">Static IP</option>
+    </select>
+    <div id="cfg_static_fields" style="display:none;">
+      <label>Static IP</label>
+      <input type="text" id="cfg_wifi_ip">
+      <label>Subnet Mask</label>
+      <input type="text" id="cfg_wifi_mask">
+      <label>Gateway</label>
+      <input type="text" id="cfg_wifi_gw">
+      <label>DNS Server</label>
+      <input type="text" id="cfg_wifi_dns">
+    </div>
+    <button class="btn btn-cfg" onclick="saveWifi()">Save Network & Reboot</button>
+    <button class="btn btn-danger" onclick="resetWifi()">Erase Wi-Fi & Enter AP Mode</button>
+  </div>
+
+  <!-- Блок 2: MQTT -->
+  <div class="settings-section">
+    <div class="section-title">MQTT Broker</div>
+    <label>Broker IP / Host</label>
+    <input type="text" id="cfg_host">
+    <label>Port (1-65535)</label>
+    <input type="number" id="cfg_port">
+    <label>Username</label>
+    <input type="text" id="cfg_user">
+    <label>Password</label>
+    <input type="password" id="cfg_pass" placeholder="Leave blank to keep unchanged">
+    <label class="check-label">
+      <input type="checkbox" id="cfg_clear_pass"> Remove/clear password
+    </label>
+    <button class="btn btn-cfg" onclick="saveMqtt()">Save MQTT</button>
+  </div>
+
+  <!-- Блок 3: Безопасность -->
+  <div class="settings-section">
+    <div class="section-title">Security / Web Auth</div>
+    <label>Username</label>
+    <input type="text" id="cfg_auth_user" placeholder="admin">
+    <label>New Password (min 4 characters)</label>
+    <input type="password" id="cfg_auth_pass" placeholder="New password">
+    <button class="btn btn-cfg" onclick="saveAuth()">Update Password</button>
+  </div>
 </div>
-<div id="mqtt_form" style="display:none; margin-top:8px;">
-<label>Broker IP</label>
-<input type="text" id="cfg_host">
-<label>Port (1-65535)</label>
-<input type="number" id="cfg_port">
-<label>User</label>
-<input type="text" id="cfg_user">
-<label>Password</label>
-<input type="password" id="cfg_pass" placeholder="Leave blank to keep unchanged">
-<label class="check-label">
-<input type="checkbox" id="cfg_clear_pass"> Remove/clear password
-</label>
-<button class="btn btn-cfg" style="width:100%; margin-top:10px;" onclick="saveMqtt()">Save MQTT</button>
-<button class="btn btn-danger" style="width:100%;" onclick="resetWifi()">Reset Wi-Fi & Re-enter AP</button>
-</div>
-</div>
-<div class="card">
-<div style="font-weight:bold; color:#89b4fa; cursor:pointer;" onclick="toggleAuthForm()">
-&#128273; Security / Password (<span id="auth_state">click to expand</span>)
-</div>
-<div id="auth_form" style="display:none; margin-top:8px;">
-<label>Username</label>
-<input type="text" id="cfg_auth_user" placeholder="admin">
-<label>New Password (min 4 characters)</label>
-<input type="password" id="cfg_auth_pass" placeholder="New password">
-<button class="btn btn-cfg" style="width:100%; margin-top:10px;" onclick="saveAuth()">Update Password</button>
-</div>
-</div>
+
 <div id="status">Ready</div>
+
 <script>
 function fmtUptime(sec) {
-if (!sec || sec <= 0) return "Down";
-const d = Math.floor(sec / 86400);
-const h = Math.floor((sec % 86400) / 3600);
-const m = Math.floor((sec % 3600) / 60);
-const s = sec % 60;
-if (d > 0) return d + "d " + h + "h " + m + "m";
-if (h > 0) return h + "h " + m + "m " + s + "s";
-return m + "m " + s + "s";
+  if (!sec || sec <= 0) return "Down";
+  const d = Math.floor(sec / 86400);
+  const h = Math.floor((sec % 86400) / 3600);
+  const m = Math.floor((sec % 3600) / 60);
+  const s = sec % 60;
+  if (d > 0) return d + "d " + h + "h " + m + "m";
+  if (h > 0) return h + "h " + m + "m " + s + "s";
+  return m + "m " + s + "s";
 }
+
 function doLogout(e) {
-if (e) e.preventDefault();
-if (!confirm('Are you sure you want to log out?')) return false;
-const xhr = new XMLHttpRequest();
-xhr.open("GET", "/logout", true, "invalid_user", "invalid_pass");
-xhr.onreadystatechange = function () {
-if (xhr.readyState === 4) {
-window.location.href = "/";
+  if (e) e.preventDefault();
+  if (!confirm('Are you sure you want to log out?')) return false;
+  const xhr = new XMLHttpRequest();
+  xhr.open("GET", "/logout", true, "invalid_user", "invalid_pass");
+  xhr.onreadystatechange = function () {
+    if (xhr.readyState === 4) window.location.href = "/";
+  };
+  xhr.send();
+  return false;
 }
-};
-xhr.send();
-return false;
-}
+
 function updateMetrics() {
-fetch('/api/metrics').then(r => {
-if (r.status === 401) { window.location.reload(); return; }
-return r.json();
-}).then(d => {
-if (!d) return;
-const s = document.getElementById('m_stat');
-if (d.status === "online") {
-s.innerText = "Online (S0)";
-s.className = "metric-val metric-ok";
-} else if (d.status === "booting") {
-s.innerText = "Booting (POST)";
-s.className = "metric-val metric-info";
-} else if (d.status === "hung") {
-s.innerText = "POST HUNG";
-s.className = "metric-val metric-bad";
-} else {
-s.innerText = "Offline (S4/S5)";
-s.className = "metric-val metric-bad";
-}
-document.getElementById('m_pwr').innerText = d.power;
-document.getElementById('m_hex').innerText = '0x' + d.post_hex;
-document.getElementById('m_huptime').innerText = (d.status === "online") ? fmtUptime(d.host_uptime) : "Down";
-document.getElementById('m_euptime').innerText = fmtUptime(d.esp_uptime);
-const descEl = document.getElementById('m_desc');
-descEl.innerText = d.description;
-descEl.style.borderLeftColor = d.error ? '#f38ba8' : (d.status === 'online' ? '#a6e3a1' : '#89b4fa');
-}).catch(() => {});
+  fetch('/api/metrics').then(r => {
+    if (r.status === 401) { window.location.reload(); return; }
+    return r.json();
+  }).then(d => {
+    if (!d) return;
+    const s = document.getElementById('m_stat');
+    if (d.status === "online") {
+      s.innerText = "Online (S0)";
+      s.className = "metric-val metric-ok";
+    } else if (d.status === "booting") {
+      s.innerText = "Booting (POST)";
+      s.className = "metric-val metric-info";
+    } else if (d.status === "hung") {
+      s.innerText = "POST HUNG";
+      s.className = "metric-val metric-bad";
+    } else {
+      s.innerText = "Offline (S4/S5)";
+      s.className = "metric-val metric-bad";
+    }
+    document.getElementById('m_pwr').innerText = d.power;
+    document.getElementById('m_hex').innerText = '0x' + d.post_hex;
+    document.getElementById('m_huptime').innerText = (d.status === "online") ? fmtUptime(d.host_uptime) : "Down";
+    document.getElementById('m_euptime').innerText = fmtUptime(d.esp_uptime);
+    const descEl = document.getElementById('m_desc');
+    descEl.innerText = d.description;
+    descEl.style.borderLeftColor = d.error ? '#f38ba8' : (d.status === 'online' ? '#a6e3a1' : '#89b4fa');
+  }).catch(() => {});
 }
 setInterval(updateMetrics, 2000);
 updateMetrics();
+
 function sendCmd(endpoint) {
-const b = document.querySelectorAll('.action-btn');
-b.forEach(x => x.disabled = true);
-document.getElementById('status').innerText = 'Sending command...';
-fetch(endpoint, { method: 'POST' }).then(r => {
-if (r.status === 401) { window.location.reload(); return; }
-if (!r.ok) throw new Error('HTTP ' + r.status);
-return r.text();
-}).then(t => {
-if (t) document.getElementById('status').innerText = t;
-}).catch(e => {
-document.getElementById('status').innerText = 'Error: ' + e.message;
-}).finally(() => {
-b.forEach(x => x.disabled = false);
-});
+  const b = document.querySelectorAll('.action-btn');
+  b.forEach(x => x.disabled = true);
+  document.getElementById('status').innerText = 'Sending command...';
+  fetch(endpoint, { method: 'POST' }).then(r => {
+    if (r.status === 401) { window.location.reload(); return; }
+    if (!r.ok) throw new Error('HTTP ' + r.status);
+    return r.text();
+  }).then(t => {
+    if (t) document.getElementById('status').innerText = t;
+  }).catch(e => {
+    document.getElementById('status').innerText = 'Error: ' + e.message;
+  }).finally(() => {
+    b.forEach(x => x.disabled = false);
+  });
 }
-function toggleMqttForm() {
-const f = document.getElementById('mqtt_form');
-const isHidden = (f.style.display === 'none');
-f.style.display = isHidden ? 'block' : 'none';
-document.getElementById('mqtt_state').innerText = isHidden ? 'click to collapse' : 'click to expand';
-if (isHidden) {
-fetch('/api/settings/mqtt').then(r => {
-if (r.status === 401) { window.location.reload(); return; }
-return r.json();
-}).then(d => {
-if (!d) return;
-document.getElementById('cfg_host').value = d.host;
-document.getElementById('cfg_port').value = d.port;
-document.getElementById('cfg_user').value = d.user;
-document.getElementById('cfg_pass').value = '';
-document.getElementById('cfg_clear_pass').checked = false;
-});
+
+function toggleStaticIpFields() {
+  const isStatic = document.getElementById('cfg_wifi_dhcp').value === "0";
+  document.getElementById('cfg_static_fields').style.display = isStatic ? 'block' : 'none';
 }
+
+function toggleSettingsPanel() {
+  const panel = document.getElementById('settings_panel');
+  const isHidden = (panel.style.display === 'none');
+  panel.style.display = isHidden ? 'block' : 'none';
+  if (isHidden) {
+    loadNetworkSettings();
+    loadMqttSettings();
+  }
 }
+
+function loadNetworkSettings() {
+  fetch('/api/settings/wifi', { credentials: 'same-origin' })
+    .then(r => {
+      if (r.status === 401) { window.location.reload(); return null; }
+      if (!r.ok) throw new Error('Wi-Fi API HTTP ' + r.status);
+      return r.json();
+    })
+    .then(d => {
+      if (!d) return;
+      document.getElementById('cfg_wifi_ssid').value = d.ssid || '';
+      document.getElementById('cfg_wifi_pass').value = '';
+      document.getElementById('cfg_wifi_dhcp').value = (d.dhcp === false || d.dhcp === 0) ? "0" : "1";
+      document.getElementById('cfg_wifi_ip').value = d.ip || '';
+      document.getElementById('cfg_wifi_mask').value = d.mask || '';
+      document.getElementById('cfg_wifi_gw').value = d.gw || '';
+      document.getElementById('cfg_wifi_dns').value = d.dns || '';
+      toggleStaticIpFields();
+    })
+    .catch(e => {
+      document.getElementById('status').innerText = 'Load error: ' + e.message;
+    });
+}
+
+function loadMqttSettings() {
+  fetch('/api/settings/mqtt').then(r => {
+    if (r.status === 401) { window.location.reload(); return; }
+    return r.json();
+  }).then(d => {
+    if (!d) return;
+    document.getElementById('cfg_host').value = d.host || '';
+    document.getElementById('cfg_port').value = d.port || 1883;
+    document.getElementById('cfg_user').value = d.user || '';
+    document.getElementById('cfg_pass').value = '';
+    document.getElementById('cfg_clear_pass').checked = false;
+  }).catch(() => {});
+}
+
+function saveWifi() {
+  const ssid = document.getElementById('cfg_wifi_ssid').value.trim();
+  if (!ssid) {
+    alert('Please enter Wi-Fi SSID');
+    return;
+  }
+  const dhcp = document.getElementById('cfg_wifi_dhcp').value;
+  const ipVal = document.getElementById('cfg_wifi_ip').value.trim();
+  const p = new URLSearchParams();
+  p.append('ssid', ssid);
+  p.append('pass', document.getElementById('cfg_wifi_pass').value);
+  p.append('dhcp', dhcp);
+  if (dhcp === "0") {
+    p.append('ip', ipVal);
+    p.append('mask', document.getElementById('cfg_wifi_mask').value.trim());
+    p.append('gw', document.getElementById('cfg_wifi_gw').value.trim());
+    p.append('dns', document.getElementById('cfg_wifi_dns').value.trim());
+  }
+
+  document.getElementById('status').innerText = 'Saving network settings...';
+  fetch('/api/settings/wifi', { method: 'POST', body: p })
+    .then(r => {
+      if (r.status === 401) { window.location.reload(); return; }
+      if (!r.ok) return r.text().then(t => { throw new Error(t); });
+      return r.text();
+    })
+    .then(t => {
+      if (!t) return;
+      document.getElementById('status').innerText = t;
+      const targetHost = (dhcp === "0" && ipVal) ? ipVal : "hpsc.local";
+      setTimeout(() => { window.location.href = 'http://' + targetHost; }, 4000);
+    })
+    .catch(e => {
+      document.getElementById('status').innerText = 'Error: ' + e.message;
+    });
+}
+
 function saveMqtt() {
-const p = new URLSearchParams();
-p.append('mq_host', document.getElementById('cfg_host').value);
-p.append('mq_port', document.getElementById('cfg_port').value);
-p.append('mq_user', document.getElementById('cfg_user').value);
-const clearPass = document.getElementById('cfg_clear_pass').checked;
-p.append('clear_pass', clearPass ? "1" : "0");
-const pass = document.getElementById('cfg_pass').value;
-if (pass) p.append('mq_pass', pass);
-document.getElementById('status').innerText = 'Queuing MQTT save...';
-fetch('/api/settings/mqtt', { method: 'POST', body: p })
-.then(r => {
-if (r.status === 401) { window.location.reload(); return; }
-if (!r.ok) return r.text().then(t => { throw new Error(t); });
-return r.text();
-})
-.then(t => {
-document.getElementById('status').innerText = t;
-toggleMqttForm();
-}).catch(e => {
-document.getElementById('status').innerText = 'Error: ' + e.message;
-});
+  const p = new URLSearchParams();
+  p.append('mq_host', document.getElementById('cfg_host').value);
+  p.append('mq_port', document.getElementById('cfg_port').value);
+  p.append('mq_user', document.getElementById('cfg_user').value);
+  const clearPass = document.getElementById('cfg_clear_pass').checked;
+  p.append('clear_pass', clearPass ? "1" : "0");
+  const pass = document.getElementById('cfg_pass').value;
+  if (pass) p.append('mq_pass', pass);
+  document.getElementById('status').innerText = 'Queuing MQTT save...';
+  fetch('/api/settings/mqtt', { method: 'POST', body: p })
+    .then(r => {
+      if (r.status === 401) { window.location.reload(); return; }
+      if (!r.ok) return r.text().then(t => { throw new Error(t); });
+      return r.text();
+    })
+    .then(t => {
+      if (t) document.getElementById('status').innerText = t;
+    }).catch(e => {
+      document.getElementById('status').innerText = 'Error: ' + e.message;
+    });
 }
-function toggleAuthForm() {
-const f = document.getElementById('auth_form');
-const isHidden = (f.style.display === 'none');
-f.style.display = isHidden ? 'block' : 'none';
-document.getElementById('auth_state').innerText = isHidden ? 'click to collapse' : 'click to expand';
-}
+
 function saveAuth() {
-const u = document.getElementById('cfg_auth_user').value.trim();
-const p = document.getElementById('cfg_auth_pass').value.trim();
-if (!u || u.length > 31) {
-alert('Username must be 1 to 31 characters');
-return;
+  const u = document.getElementById('cfg_auth_user').value.trim();
+  const p = document.getElementById('cfg_auth_pass').value.trim();
+  if (!u || u.length > 31) {
+    alert('Username must be 1 to 31 characters');
+    return;
+  }
+  if (p.length < 4 || p.length > 63) {
+    alert('Password must be 4 to 63 characters');
+    return;
+  }
+  const params = new URLSearchParams();
+  params.append('user', u);
+  params.append('pass', p);
+  fetch('/api/settings/auth', { method: 'POST', body: params })
+    .then(r => {
+      if (r.status === 401) { window.location.reload(); return; }
+      if (!r.ok) return r.text().then(t => { throw new Error(t); });
+      alert('Credentials updated! You will now be redirected to log in with new password.');
+      window.location.href = '/logout';
+    })
+    .catch(e => alert('Error: ' + e.message));
 }
-if (p.length < 4 || p.length > 63) {
-alert('Password must be 4 to 63 characters');
-return;
-}
-const params = new URLSearchParams();
-params.append('user', u);
-params.append('pass', p);
-fetch('/api/settings/auth', { method: 'POST', body: params })
-.then(r => {
-if (r.status === 401) { window.location.reload(); return; }
-if (!r.ok) return r.text().then(t => { throw new Error(t); });
-alert('Credentials updated! You will now be redirected to log in with new password.');
-window.location.href = '/logout';
-})
-.catch(e => alert('Error: ' + e.message));
-}
+
 function resetWifi() {
-if (confirm('Erase Wi-Fi settings and start AP Mode?')) {
-fetch('/api/reset_wifi', { method: 'POST' }).then(r => {
-if (!r.ok) throw new Error('Busy');
-document.getElementById('status').innerText = 'Controller restarting into AP Mode...';
-}).catch(() => {
-document.getElementById('status').innerText = 'Error: System busy';
-});
-}
+  if (confirm('Erase Wi-Fi settings and start AP Mode?')) {
+    fetch('/api/reset_wifi', { method: 'POST' }).then(r => {
+      if (!r.ok) throw new Error('Busy');
+      document.getElementById('status').innerText = 'Controller restarting into AP Mode...';
+    }).catch(() => {
+      document.getElementById('status').innerText = 'Error: System busy';
+    });
+  }
 }
 </script>
 </body></html>
@@ -1258,15 +1404,43 @@ void mqttCallback(char* topic, byte* payload, unsigned int length) {
 void startCaptivePortal() {
     isApMode = true;
     Serial.println("\n[WIFI] Entering AP_STA Mode (Captive Portal)...");
+    
+    // Смешанный режим обязателен для корректной работы сканера сетей
     WiFi.mode(WIFI_AP_STA);
+    
     IPAddress apIP(192, 168, 4, 1);
-    WiFi.softAPConfig(apIP, apIP, IPAddress(255, 255, 255, 0));
+    IPAddress netMsk(255, 255, 255, 0);
+    // Явно указываем IP, Gateway и Subnet
+    WiFi.softAPConfig(apIP, apIP, netMsk);
     WiFi.softAP("HPSC-Config-AP", "P@$$w0rd");
+    
+    dnsServer.setErrorReplyCode(DNSReplyCode::NoError);
     dnsServer.start(DNS_PORT, "*", apIP);
 
     server.on("/", HTTP_GET, [](AsyncWebServerRequest *request) {
         request->send(200, "text/html; charset=utf-8", config_html);
     });
+
+    // Обработчики проверки Captive Portal для основных ОС
+    auto redirectToPortal = [](AsyncWebServerRequest *request) {
+        request->redirect("http://192.168.4.1/");
+    };
+
+    // Android / ChromeOS
+    server.on("/generate_204", HTTP_GET, redirectToPortal);
+    server.on("/gen_204", HTTP_GET, redirectToPortal);
+
+    // Apple iOS / macOS
+    server.on("/hotspot-detect.html", HTTP_GET, redirectToPortal);
+    server.on("/library/test/success.html", HTTP_GET, redirectToPortal);
+
+    // Windows NCSI
+    server.on("/connecttest.txt", HTTP_GET, redirectToPortal);
+    server.on("/ncsi.txt", HTTP_GET, redirectToPortal);
+    server.on("/redirect", HTTP_GET, redirectToPortal);
+
+    // Универсальный перехват всех остальных HTTP-запросов
+    server.onNotFound(redirectToPortal);
 
     // Безопасная отдача кэша сканирования
     server.on("/scan", HTTP_GET, [](AsyncWebServerRequest *request) {
@@ -1566,6 +1740,87 @@ void setup() {
         }
     });
 
+    // Чтение текущих сетевых настроек (для панели Settings)
+    server.on("/api/settings/wifi", HTTP_GET, [](AsyncWebServerRequest *req) {
+        if (!isAuthenticated(req)) return req->requestAuthentication();
+        JsonDocument doc;
+        if (xSemaphoreTake(cfgMutex, pdMS_TO_TICKS(100)) == pdTRUE) {
+            doc["ssid"] = appCfg.wifi_ssid;
+            doc["dhcp"] = appCfg.wifi_dhcp;
+            if (appCfg.wifi_dhcp && WiFi.status() == WL_CONNECTED) {
+                doc["ip"]   = WiFi.localIP().toString();
+                doc["mask"] = WiFi.subnetMask().toString();
+                doc["gw"]   = WiFi.gatewayIP().toString();
+                doc["dns"]  = WiFi.dnsIP().toString();
+            } else {
+                doc["ip"]   = appCfg.wifi_ip;
+                doc["mask"] = appCfg.wifi_mask;
+                doc["gw"]   = appCfg.wifi_gw;
+                doc["dns"]  = appCfg.wifi_dns;
+            }
+            xSemaphoreGive(cfgMutex);
+        } else {
+            req->send(503, "text/plain", "Resource busy");
+            return;
+        }
+        String out;
+        serializeJson(doc, out);
+        req->send(200, "application/json", out);
+    });
+
+    // Сохранение новых сетевых настроек из штатного Web UI
+    server.on("/api/settings/wifi", HTTP_POST, [](AsyncWebServerRequest *req) {
+        if (!isAuthenticated(req)) return req->requestAuthentication();
+        String ssid = req->hasParam("ssid", true) ? req->getParam("ssid", true)->value() : "";
+        String pass = req->hasParam("pass", true) ? req->getParam("pass", true)->value() : "";
+        bool dhcp   = req->hasParam("dhcp", true) ? (req->getParam("dhcp", true)->value() == "1") : true;
+        String ip   = req->hasParam("ip", true) ? req->getParam("ip", true)->value() : "";
+        String mask = req->hasParam("mask", true) ? req->getParam("mask", true)->value() : "";
+        String gw   = req->hasParam("gw", true) ? req->getParam("gw", true)->value() : "";
+        String dns  = req->hasParam("dns", true) ? req->getParam("dns", true)->value() : "";
+
+        ssid.trim();
+        if (ssid.length() == 0 || ssid.length() > 32 || pass.length() > 64) {
+            req->send(400, "text/plain", "Invalid SSID (1-32 chars) or password length");
+            return;
+        }
+
+        // Если пароль оставлен пустым и SSID не менялся — сохраняем действующий пароль
+        if (pass.length() == 0) {
+            if (xSemaphoreTake(cfgMutex, pdMS_TO_TICKS(100)) == pdTRUE) {
+                if (ssid == appCfg.wifi_ssid) {
+                    pass = appCfg.wifi_pass;
+                }
+                xSemaphoreGive(cfgMutex);
+            }
+        }
+
+        if (!dhcp) {
+            IPAddress tIp, tMask, tGw, tDns;
+            if (!tIp.fromString(ip) || !tMask.fromString(mask) || !tGw.fromString(gw) || !tDns.fromString(dns)) {
+                req->send(400, "text/plain", "Invalid Static IP configuration");
+                return;
+            }
+        }
+
+        SystemCommand cmd;
+        memset(&cmd, 0, sizeof(cmd));
+        cmd.action = ACT_SAVE_WIFI;
+        safeStrCopy(cmd.wifiPayload.ssid, ssid.c_str(), sizeof(cmd.wifiPayload.ssid));
+        safeStrCopy(cmd.wifiPayload.pass, pass.c_str(), sizeof(cmd.wifiPayload.pass));
+        cmd.wifiPayload.dhcp = dhcp;
+        safeStrCopy(cmd.wifiPayload.ip, ip.c_str(), sizeof(cmd.wifiPayload.ip));
+        safeStrCopy(cmd.wifiPayload.mask, mask.c_str(), sizeof(cmd.wifiPayload.mask));
+        safeStrCopy(cmd.wifiPayload.gw, gw.c_str(), sizeof(cmd.wifiPayload.gw));
+        safeStrCopy(cmd.wifiPayload.dns, dns.c_str(), sizeof(cmd.wifiPayload.dns));
+
+        if (xQueueSend(cmdQueue, &cmd, 0) == pdTRUE) {
+            req->send(202, "text/plain", "Network settings saved. Controller restarting...");
+        } else {
+            req->send(409, "text/plain", "Command queue busy");
+        }
+    });
+
     server.on("/api/settings/mqtt", HTTP_GET, [](AsyncWebServerRequest *req) {
         if (!isAuthenticated(req)) return req->requestAuthentication();
         JsonDocument doc;
@@ -1735,6 +1990,24 @@ bool startWifiScan() {
 void loop() {
     updateLed();
 
+    // Проверка кнопки BOOT (удержание 5 секунд для сброса)
+    static uint32_t bootPressStart = 0;
+    if (digitalRead(PIN_BOOT) == LOW) {
+        if (bootPressStart == 0) bootPressStart = millis();
+        else if (millis() - bootPressStart > 5000) {
+            Serial.println("[SYSTEM] BOOT button held for 5s. Clearing NVS and restarting...");
+            digitalWrite(PIN_LED, HIGH); // Индикация сброса
+            if (prefs.begin("hpsc_cfg", false)) {
+                prefs.clear();
+                prefs.end();
+            }
+            delay(1000);
+            ESP.restart();
+        }
+    } else {
+        bootPressStart = 0;
+    }
+
     // Обработка запроса на принудительное сканирование
     if (scanTriggered && !scanInProgress) {
         scanTriggered = false;
@@ -1783,22 +2056,22 @@ void loop() {
         }
     }
 
+    // Обработка DNS запросов в режиме AP
     if (isApMode) {
         dnsServer.processNextRequest();
-        updatePulse();
-        updatePostFSM();
-        checkAutoPower();
-        updateRestart();
-        processIncomingCommands();
-        vTaskDelay(pdMS_TO_TICKS(5));
-        return;
     }
 
+    // Эти функции должны работать всегда, независимо от режима (AP или STA)
     processIncomingCommands();
     updatePulse();
     updatePostFSM();
-    checkMqtt();
     checkAutoPower();
     updateRestart();
+
+    // MQTT работает только в режиме STA при подключенном Wi-Fi
+    if (!isApMode && WiFi.status() == WL_CONNECTED) {
+        checkMqtt();
+    }
+
     vTaskDelay(pdMS_TO_TICKS(2));
 }
